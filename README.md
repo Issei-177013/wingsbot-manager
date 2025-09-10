@@ -4,7 +4,7 @@ A small, menu-driven Bash manager to **create, run, list, stop, renew, and auto-
 
 ## One-liner install (Ubuntu)
 ```bash
-bash -c "$(curl -fsSL https://github.com/Issei-177013/wingsbot-manager/main/install.sh)"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/Issei-177013/wingsbot-manager/main/install.sh)"
 ```
 
 Then run:
