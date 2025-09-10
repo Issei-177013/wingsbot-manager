@@ -13,7 +13,7 @@ fi
 echo "[*] Updating apt cache..."
 apt-get update -y
 
-# Use Ubuntu's docker.io + docker-compose-plugin; avoid containerd.io conflicts
+# Use Ubuntu's docker.io + docker-compose-plugin; avoid containerd.io conflicts on 24.04
 echo "[*] Installing required packages..."
 DEBIAN_FRONTEND=noninteractive apt-get install -y \
   git docker.io docker-compose-plugin curl ca-certificates

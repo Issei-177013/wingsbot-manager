@@ -43,11 +43,17 @@ container_running(){ local name="$1"; docker ps --format '{{.Names}}' | grep -Fx
 
 pick_free_port(){
   local used
-  used="$(
-    { docker ps --format '{{.Ports}}' | tr ',' '\n' | sed -En 's/.*:([0-9]+)->.*/\1/p'; \
-      ss -tuln | awk 'NR>1{split($5,a,\":\"); print a[length(a)]}'; } \
-    | sort -u
-  )"
+  if command -v ss >/dev/null 2>&1; then
+    used="$(
+      { docker ps --format '{{.Ports}}' | tr ',' '\n' | sed -En 's/.*:([0-9]+)->.*/\1/p'; \
+        ss -tuln | awk 'NR>1{split($5,a,":"); print a[length(a)]}'; } \
+      | sort -u
+    )"
+  else
+    used="$(
+      docker ps --format '{{.Ports}}' | tr ',' '\n' | sed -En 's/.*:([0-9]+)->.*/\1/p' | sort -u
+    )"
+  fi
   for p in $(seq "$PORT_RANGE_START" "$PORT_RANGE_END"); do
     if ! grep -qx "$p" <<< "$used"; then echo "$p"; return 0; fi
   done
@@ -73,7 +79,11 @@ cmd_create(){
   read -rp "CHANNEL_ID (optional, e.g. @mychannel or -100...): " CHANNEL_ID
   read -rp "USE_WEBHOOK? [false]: " USE_WEBHOOK; USE_WEBHOOK=${USE_WEBHOOK:-false}
 
-  local HOST_PORT="" INTERNAL_PORT="$DEFAULT_INTERNAL_PORT" WEBHOOK_URL="" WEBHOOK_SECRET=""
+  local HOST_PORT=""
+  local INTERNAL_PORT="$DEFAULT_INTERNAL_PORT"
+  local WEBHOOK_URL=""
+  local WEBHOOK_SECRET=""
+
   if [[ "${USE_WEBHOOK,,}" == "true" ]]; then
     read -rp "WEBHOOK_URL (e.g. https://example.com/hook): " WEBHOOK_URL
     read -rp "WEBHOOK_SECRET (optional): " WEBHOOK_SECRET
