@@ -1,0 +1,8 @@
+# bots data/logs
+bots/*/data/
+bots/*/logs/
+
+# OS / editor
+.DS_Store
+*.swp
+*.swo
