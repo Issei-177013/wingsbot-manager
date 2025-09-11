@@ -467,6 +467,76 @@ cmd_self_update(){
   fi
 }
 
+# === Admin Control Bot (Telegram) ===
+ADMIN_BOT_DIR="${MANAGER_ROOT}/manager_bot"
+ADMIN_BOT_ENV="${ADMIN_BOT_DIR}/.env"
+ADMIN_BOT_VENV="${ADMIN_BOT_DIR}/.venv"
+ADMIN_BOT_SERVICE="/etc/systemd/system/wingsbot-admin.service"
+
+cmd_admin_bot_install(){
+  need_cmd python3; need_cmd pip3
+  if ! python3 -m venv --help >/dev/null 2>&1; then
+    yellow "python3-venv not found; attempting to install..."
+    if command -v apt-get >/dev/null 2>&1; then
+      sudo apt-get update -y && sudo apt-get install -y python3-venv || true
+    fi
+  fi
+  mkdir -p "$ADMIN_BOT_DIR"
+  local token="" admins=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --token) token="$2"; shift 2;;
+      --token=*) token="${1#*=}"; shift;;
+      --admins) admins="$2"; shift 2;;
+      --admins=*) admins="${1#*=}"; shift;;
+      *) shift;;
+    esac
+  done
+  if [[ ! -f "$ADMIN_BOT_ENV" ]]; then
+    if [[ -z "$token" ]]; then read -rp "MANAGER_BOT_TOKEN: " token; fi
+    if [[ -z "$admins" ]]; then read -rp "ADMIN_IDS (comma separated): " admins; fi
+    cat > "$ADMIN_BOT_ENV" <<EOF
+MANAGER_BOT_TOKEN=${token}
+ADMIN_IDS=${admins}
+WINGS_MANAGER_BIN=$(command -v wingsbot-manager || echo ${MANAGER_ROOT}/wingsbot-manager.sh)
+EOF
+  fi
+  python3 -m venv "$ADMIN_BOT_VENV"
+  "${ADMIN_BOT_VENV}/bin/pip" install --upgrade pip
+  "${ADMIN_BOT_VENV}/bin/pip" install -r "${ADMIN_BOT_DIR}/requirements.txt"
+  sudo bash -c "cat > '$ADMIN_BOT_SERVICE'" <<EOF
+[Unit]
+Description=WINGS Manager Telegram Control Bot
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=${ADMIN_BOT_DIR}
+EnvironmentFile=${ADMIN_BOT_ENV}
+ExecStart=${ADMIN_BOT_VENV}/bin/python ${ADMIN_BOT_DIR}/bot.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  sudo systemctl daemon-reload
+  sudo systemctl enable --now wingsbot-admin.service
+  green "Admin bot installed and started. Use: systemctl status wingsbot-admin"
+}
+
+cmd_admin_bot_start(){ sudo systemctl start wingsbot-admin.service; }
+cmd_admin_bot_stop(){ sudo systemctl stop wingsbot-admin.service; }
+cmd_admin_bot_restart(){ sudo systemctl restart wingsbot-admin.service; }
+cmd_admin_bot_status(){ systemctl --no-pager --full status wingsbot-admin.service || true; }
+cmd_admin_bot_logs(){ journalctl -u wingsbot-admin.service -n 200 --no-pager || true; }
+cmd_admin_bot_edit(){ ${EDITOR:-nano} "$ADMIN_BOT_ENV"; }
+cmd_admin_bot_uninstall(){ sudo systemctl disable --now wingsbot-admin.service || true; sudo rm -f "$ADMIN_BOT_SERVICE"; sudo systemctl daemon-reload; green "Admin bot uninstalled."; }
+
+# Admin bot env management (non-interactive)
+cmd_admin_bot_get_env(){ local key="${1:-}"; if [[ -z "$key" ]]; then sed -n '1,200p' "$ADMIN_BOT_ENV"; else grep -E "^${key}=" "$ADMIN_BOT_ENV" || true; fi }
+cmd_admin_bot_set_env(){ local key="$1"; local value="$2"; local norestart="${3:-}"; [[ -n "$key" && -n "$value" ]] || die "Usage: $0 admin-bot set-env <KEY> <VALUE> [--no-restart]"; touch "$ADMIN_BOT_ENV"; if grep -qE "^${key}=" "$ADMIN_BOT_ENV"; then sed -i -E "s|^${key}=.*|${key}=${value}|" "$ADMIN_BOT_ENV"; else echo "${key}=${value}" >> "$ADMIN_BOT_ENV"; fi; [[ "$norestart" == "--no-restart" ]] || cmd_admin_bot_restart; }
+cmd_admin_bot_unset_env(){ local key="$1"; local norestart="${2:-}"; [[ -n "$key" ]] || die "Usage: $0 admin-bot unset-env <KEY> [--no-restart]"; sed -i -E "/^${key}=.*/d" "$ADMIN_BOT_ENV" || true; [[ "$norestart" == "--no-restart" ]] || cmd_admin_bot_restart; }
 # Rebuild a single bot (compose down + up --build), skip if expired
 cmd_rebuild(){
   local bot="${1:-}"; [[ -n "$bot" ]] || { read -rp "Bot name to rebuild: " bot; }
@@ -509,113 +579,12 @@ cmd_update_all(){
   cmd_rebuild_all
 }
 
-# === Menus ===
-select_bot(){
-  local i=0; declare -a names; echo "Available bots:"
-  for d in "${BOTS_DIR}"/*; do [[ -d "$d" ]] || continue; names+=("$(basename "$d")"); printf "%2d) %s\n" "$((++i))" "${names[-1]}"; done
-  [[ ${#names[@]} -gt 0 ]] || { echo "No bots found."; return 1; }
-  local choice; read -rp "Choose [1-${#names[@]}]: " choice; [[ "$choice" =~ ^[0-9]+$ ]] && (( choice>=1 && choice<=${#names[@]} )) || return 1
-  echo "${names[$((choice-1))]}"
-}
-
-menu_manage_bot(){
-  local bot; bot="${1:-}"; [[ -n "$bot" ]] || bot="$(select_bot)" || return 0
-  while true; do
-    echo -e "\n[Manage: $bot]"
-    echo " 1) Start"
-    echo " 2) Stop"
-    echo " 3) Restart"
-    echo " 4) Logs"
-    echo " 5) Info"
-    echo " 6) Edit config"
-    echo " 7) Set expiry"
-    echo " 8) Renew"
-    echo " 9) Remove"
-    echo "10) Back"
-    read -rp "Choose: " a
-    case "$a" in
-      1) cmd_start "$bot";;
-      2) cmd_stop "$bot";;
-      3) cmd_restart "$bot";;
-      4) cmd_logs "$bot";;
-      5) cmd_info "$bot";;
-      6) cmd_edit "$bot";;
-      7) read -rp "Expiry (days or YYYY-MM-DD): " v; cmd_set_expiry "$bot" "$v";;
-      8) read -rp "Days to extend: " d; cmd_renew "$bot" "$d";;
-      9) read -rp "Type the bot name to confirm removal: " c; [[ "$c" == "$bot" ]] && cmd_rm "$bot" && break || echo "Cancelled.";;
-     10) break;;
-      *) echo "Invalid";;
-    esac
-    action_pause
-  done
-}
-
 install_cron(){
   local bin; bin="$(command -v wingsbot-manager || true)"; [[ -n "$bin" ]] || bin="${MANAGER_ROOT}/wingsbot-manager"
   (crontab -l 2>/dev/null | grep -v 'wingsbot-manager check-expiry' || true; echo "0 */12 * * * ${bin} check-expiry >/dev/null 2>&1") | crontab -
   green "Cron installed (every 12 hours)."
 }
 remove_cron(){ crontab -l 2>/dev/null | grep -v 'wingsbot-manager check-expiry' | crontab - || true; green "Cron removed."; }
-
-menu_housekeeping(){
-  while true; do
-    echo -e "\n[Housekeeping]"
-    echo " 1) Run expiry check now"
-    echo " 2) Install cron (check-expiry)"
-    echo " 3) Remove cron"
-    echo " 4) Update vendored fork"
-    echo " 5) Rebuild a bot"
-    echo " 6) Rebuild all (non-expired)"
-    echo " 7) Update vendor + rebuild all"
-    echo " 8) Admin control bot"
-    echo " 9) Self-update manager"
-    echo "10) Back"
-    read -rp "Choose: " a
-    case "$a" in
-      1) cmd_check_expiry;;
-      2) install_cron;;
-      3) remove_cron;;
-      4) cmd_update_vendor;;
-      5) read -rp "Bot name: " b; cmd_rebuild "$b";;
-      6) cmd_rebuild_all;;
-      7) cmd_update_all;;
-      8) menu_admin_bot;;
-      9) cmd_self_update;;
-     10) break;;
-      *) echo "Invalid";;
-    esac
-    action_pause
-  done
-}
-
-menu_admin_bot(){
-  while true; do
-    echo -e "\n[Admin Control Bot]"
-    echo " 1) Install"
-    echo " 2) Start"
-    echo " 3) Stop"
-    echo " 4) Restart"
-    echo " 5) Status"
-    echo " 6) Logs"
-    echo " 7) Edit config"
-    echo " 8) Uninstall"
-    echo " 9) Back"
-    read -rp "Choose: " a
-    case "$a" in
-      1) cmd_admin_bot_install;;
-      2) cmd_admin_bot_start;;
-      3) cmd_admin_bot_stop;;
-      4) cmd_admin_bot_restart;;
-      5) cmd_admin_bot_status;;
-      6) cmd_admin_bot_logs;;
-      7) cmd_admin_bot_edit;;
-      8) cmd_admin_bot_uninstall;;
-      9) break;;
-      *) echo "Invalid";;
-    esac
-    action_pause
-  done
-}
 
 # Get/Set/Unset .env values for a bot
 cmd_get_env(){
@@ -761,9 +730,47 @@ menu_main(){
 # === CLI entrypoint ===
 need_cmd git; need_cmd docker; docker compose version >/dev/null 2>&1 || die "Docker Compose plugin required (docker compose)."
 
-cmd="${1:-menu}"; shift || true
+print_help(){
+  cat <<'USAGE'
+Usage: wingsbot-manager <command> [args]
+
+Core (used by Telegram control bot):
+  create <name>            Create & run a new bot (prompts via stdin)
+  list                     List bots
+  info <name>              Show .env / metadata / compose
+  start|stop|restart <name>
+  logs <name>              Follow logs
+  logs-once <name>         Show last 200 lines
+  rm <name>                Remove a bot
+  edit <name>              Interactive edit
+  set-expiry <name> <val>  days|YYYY-MM-DD|0
+  renew <name> <days>
+  rebuild <name>
+  rebuild-all
+  update-all
+  get-env <name> [KEY]
+  set-env <name> KEY VALUE [--no-restart]
+  unset-env <name> KEY [--no-restart]
+  set-host-port <name> <auto|PORT>
+
+Housekeeping:
+  check-expiry             Stop expired bots
+  cron install|remove      Manage expiry-check cron
+  update-vendor            Update vendored WINGSBOT
+  self-update [--force|--apply-stash]
+
+Manager bot:
+  admin-bot install [--token TOKEN --admins 1,2]
+  admin-bot start|stop|restart|status|logs|edit|uninstall
+  admin-bot get-env [KEY]
+  admin-bot set-env KEY VALUE [--no-restart]
+  admin-bot unset-env KEY [--no-restart]
+USAGE
+}
+
+cmd="${1:-help}"; shift || true
 case "$cmd" in
-  menu)            menu_main;;
+  help|--help|-h)  print_help;;
   create)          cmd_create "${1:-}";;
   list)            cmd_list;;
   info)            cmd_info "${1:-}";;
@@ -772,6 +779,13 @@ case "$cmd" in
   restart)         cmd_restart "${1:-}";;
   logs)            cmd_logs "${1:-}";;
   logs-once)       cmd_logs_once "${1:-}";;
+  cron)
+    sub="${1:-}"; shift || true
+    case "$sub" in
+      install) install_cron;;
+      remove)  remove_cron;;
+      *) echo "Use: wingsbot-manager cron [install|remove]";;
+    esac;;
   rm)              cmd_rm "${1:-}";;
   edit)            cmd_edit "${1:-}";;
   rebuild)         cmd_rebuild "${1:-}";;
@@ -785,8 +799,22 @@ case "$cmd" in
   renew)           cmd_renew "${1:-}" "${2:-}";;
   check-expiry)    cmd_check_expiry;;
   update-vendor)   cmd_update_vendor;;
-  self-update)     cmd_self_update;;
-  admin-bot)       sub="${1:-}"; shift || true; case "$sub" in install) cmd_admin_bot_install;; start) cmd_admin_bot_start;; stop) cmd_admin_bot_stop;; restart) cmd_admin_bot_restart;; status) cmd_admin_bot_status;; logs) cmd_admin_bot_logs;; edit) cmd_admin_bot_edit;; uninstall) cmd_admin_bot_uninstall;; *) echo "Use: wingsbot-manager admin-bot [install|start|stop|restart|status|logs|edit|uninstall]";; esac;;
-  help|--help|-h)  echo "Use: wingsbot-manager [menu|create|list|info|start|stop|restart|logs|logs-once|rm|edit|rebuild|rebuild-all|update-all|get-env|set-env|unset-env|set-host-port|set-expiry|renew|check-expiry|update-vendor|self-update|admin-bot]";;
-  *)               menu_main;;
+  self-update)     cmd_self_update "$@";;
+  admin-bot)
+    sub="${1:-}"; shift || true
+    case "$sub" in
+      install)   cmd_admin_bot_install "$@";;
+      start)     cmd_admin_bot_start;;
+      stop)      cmd_admin_bot_stop;;
+      restart)   cmd_admin_bot_restart;;
+      status)    cmd_admin_bot_status;;
+      logs)      cmd_admin_bot_logs;;
+      edit)      cmd_admin_bot_edit;;
+      uninstall) cmd_admin_bot_uninstall;;
+      get-env)   cmd_admin_bot_get_env "${1:-}";;
+      set-env)   cmd_admin_bot_set_env "${1:-}" "${2:-}" "${3:-}";;
+      unset-env) cmd_admin_bot_unset_env "${1:-}" "${2:-}";;
+      *)         echo "Use: wingsbot-manager admin-bot [install|start|stop|restart|status|logs|edit|uninstall|get-env|set-env|unset-env]";;
+    esac;;
+  *)               print_help;;
 esac
