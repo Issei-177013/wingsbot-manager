@@ -3,6 +3,8 @@ set -euo pipefail
 
 # === Config ===
 REPO_URL="https://github.com/Issei-177013/WINGSBOT.git"
+# Manager repo (for safe upgrade)
+MANAGER_REPO_URL="https://github.com/Issei-177013/wingsbot-manager.git"
 # Resolve script directory even when invoked via symlink
 SOURCE="${BASH_SOURCE[0]}"
 while [ -h "$SOURCE" ]; do
@@ -467,6 +469,66 @@ cmd_self_update(){
   fi
 }
 
+# === Safe upgrade (pull fresh snapshot and copy code; preserve bots/vendor/state)
+cmd_upgrade(){
+  local repo="$MANAGER_REPO_URL"
+  local ref="${1:-}"   # optional branch or tag
+  local tmp
+  tmp="$(mktemp -d /tmp/wbm-upgrade.XXXXXX)" || die "mktemp failed"
+  green "Fetching latest manager code..."
+  if git clone --depth 1 "$repo" "$tmp" >/dev/null 2>&1; then
+    :
+  else
+    rm -rf "$tmp"; die "git clone failed: $repo"
+  fi
+  if [[ -n "$ref" ]]; then
+    (cd "$tmp" && git fetch --depth 1 origin "$ref" && git checkout -q FETCH_HEAD) || {
+      rm -rf "$tmp"; die "failed to checkout ref: $ref"
+    }
+  fi
+
+  # Helper copy with sudo fallback
+  _cp(){ cp -f "$1" "$2" 2>/dev/null || sudo cp -f "$1" "$2"; }
+  _cpdir(){
+    mkdir -p "$2" 2>/dev/null || sudo mkdir -p "$2"
+    cp -rf "$1"/* "$2" 2>/dev/null || sudo cp -rf "$1"/* "$2"
+  }
+
+  # Copy top-level scripts/docs (preserve bots/, vendor/, manager_bot/.env, .venv)
+  for f in wingsbot-manager.sh install.sh uninstall.sh README.md LICENSE; do
+    if [[ -f "$tmp/$f" ]]; then _cp "$tmp/$f" "$MANAGER_ROOT/$f"; fi
+  done
+  chmod +x "$MANAGER_ROOT/wingsbot-manager.sh" 2>/dev/null || sudo chmod +x "$MANAGER_ROOT/wingsbot-manager.sh"
+
+  # Update manager_bot code but keep env/venv
+  if [[ -d "$tmp/manager_bot" ]]; then
+    mkdir -p "$ADMIN_BOT_DIR" 2>/dev/null || sudo mkdir -p "$ADMIN_BOT_DIR"
+    if [[ -f "$tmp/manager_bot/bot.py" ]]; then _cp "$tmp/manager_bot/bot.py" "$ADMIN_BOT_DIR/bot.py"; fi
+    if [[ -f "$tmp/manager_bot/requirements.txt" ]]; then
+      local oldh newh
+      oldh="$(sha1sum "$ADMIN_BOT_DIR/requirements.txt" 2>/dev/null | awk '{print $1}')"
+      newh="$(sha1sum "$tmp/manager_bot/requirements.txt" 2>/dev/null | awk '{print $1}')"
+      _cp "$tmp/manager_bot/requirements.txt" "$ADMIN_BOT_DIR/requirements.txt"
+      if [[ -n "$newh" && "$newh" != "$oldh" ]]; then
+        yellow "Admin bot requirements changed; updating venv..."
+        if [[ -x "$ADMIN_BOT_VENV/bin/pip" ]]; then
+          "$ADMIN_BOT_VENV/bin/pip" install -q --upgrade -r "$ADMIN_BOT_DIR/requirements.txt" 2>/dev/null || \
+          sudo "$ADMIN_BOT_VENV/bin/pip" install -q --upgrade -r "$ADMIN_BOT_DIR/requirements.txt" || true
+          # restart if running
+          if systemctl is-active --quiet wingsbot-admin.service 2>/dev/null; then
+            sudo systemctl restart wingsbot-admin.service || true
+          fi
+        fi
+      fi
+    fi
+  fi
+
+  local rev
+  rev="$(git -C "$tmp" rev-parse --short HEAD 2>/dev/null || echo '?')"
+  rm -rf "$tmp"
+  green "Manager upgraded to snapshot ${rev}. Data under 'bots/' and 'vendor/' preserved."
+}
+
 # === Admin Control Bot (Telegram) ===
 ADMIN_BOT_DIR="${MANAGER_ROOT}/manager_bot"
 ADMIN_BOT_ENV="${ADMIN_BOT_DIR}/.env"
@@ -799,6 +861,7 @@ case "$cmd" in
   renew)           cmd_renew "${1:-}" "${2:-}";;
   check-expiry)    cmd_check_expiry;;
   update-vendor)   cmd_update_vendor;;
+  upgrade)         cmd_upgrade "${1:-}";;
   self-update)     cmd_self_update "$@";;
   admin-bot)
     sub="${1:-}"; shift || true

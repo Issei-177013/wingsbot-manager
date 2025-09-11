@@ -77,7 +77,8 @@ wingsbot-manager update-all
 - `check-expiry`: stop any expired bots (use in cron)
 - `cron install|remove`: manage expiry-check cron
 - `update-vendor`: pull latest code for your vendored fork
-- `self-update [--force|--apply-stash]`: update the manager repo itself
+- `upgrade [<ref>]`: safe upgrade (download snapshot and replace code, keep data)
+- `self-update [--force|--apply-stash]`: in-place git update (advanced)
 - `admin-bot [install|start|stop|restart|status|logs|edit|uninstall|get-env|set-env|unset-env]`: Telegram control bot setup & management
 
 ## Defaults (editable at top of script)
