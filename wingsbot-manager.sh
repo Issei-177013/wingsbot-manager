@@ -14,7 +14,7 @@ MANAGER_ROOT="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 VENDOR_DIR="${MANAGER_ROOT}/vendor"
 REPO_DIR="${VENDOR_DIR}/WINGSBOT"
 BOTS_DIR="${MANAGER_ROOT}/bots"
-DEFAULT_INTERNAL_PORT="9090"   # used only if USE_WEBHOOK=true
+DEFAULT_WEBHOOK_PORT="8080"   # internal port used only if USE_WEBHOOK=true (WINGSBOT default)
 DEFAULT_EXPIRE_DAYS="0"        # 0 = no expiry
 PORT_RANGE_START=10001
 PORT_RANGE_END=19999
@@ -77,7 +77,7 @@ compose_up(){
   local bot="$1"
   local dir="${BOTS_DIR}/${bot}"
   # Always prebuild with classic builder to avoid buildx path issues
-  DOCKER_BUILDKIT=0 docker build -t "$bot" "$REPO_DIR"
+  DOCKER_BUILDKIT=0 docker build -t "wingsbot-${bot}" "$REPO_DIR"
   (cd "$dir" && docker compose up -d --no-build)
 }
 compose_down(){
@@ -100,17 +100,19 @@ cmd_create(){
   read -rp "BOT_TOKEN: " BOT_TOKEN
   read -rp "ADMIN_ID (numeric): " ADMIN_ID
   read -rp "CHANNEL_ID (optional, e.g. @mychannel or -100...): " CHANNEL_ID
+  read -rp "CHANNEL_USERNAME (optional, e.g. mychannel or @mychannel): " CHANNEL_USERNAME
   read -rp "USE_WEBHOOK? [false]: " USE_WEBHOOK; USE_WEBHOOK=${USE_WEBHOOK:-false}
 
   local HOST_PORT=""
-  local INTERNAL_PORT="$DEFAULT_INTERNAL_PORT"
+  local WEBHOOK_PORT="$DEFAULT_WEBHOOK_PORT"
   local WEBHOOK_URL=""
   local WEBHOOK_SECRET=""
 
   if [[ "${USE_WEBHOOK,,}" == "true" ]]; then
-    read -rp "WEBHOOK_URL (e.g. https://example.com/hook): " WEBHOOK_URL
+    read -rp "WEBHOOK_URL (public base, e.g. https://example.com): " WEBHOOK_URL
+    read -rp "WEBHOOK_PATH (optional, default token): " WEBHOOK_PATH
+    read -rp "WEBHOOK_PORT [${DEFAULT_WEBHOOK_PORT}]: " tmp; WEBHOOK_PORT=${tmp:-$DEFAULT_WEBHOOK_PORT}
     read -rp "WEBHOOK_SECRET (optional): " WEBHOOK_SECRET
-    read -rp "INTERNAL_PORT [${DEFAULT_INTERNAL_PORT}]: " tmp; INTERNAL_PORT=${tmp:-$DEFAULT_INTERNAL_PORT}
     read -rp "Auto-assign HOST_PORT? [Y/n]: " auto; auto=${auto:-Y}
     if [[ "${auto,,}" == "y" ]]; then
       HOST_PORT="$(pick_free_port)" || die "No free host ports in ${PORT_RANGE_START}-${PORT_RANGE_END}"
@@ -129,10 +131,14 @@ cmd_create(){
 BOT_TOKEN=${BOT_TOKEN}
 ADMIN_ID=${ADMIN_ID}
 CHANNEL_ID=${CHANNEL_ID}
+CHANNEL_USERNAME=${CHANNEL_USERNAME}
 USE_WEBHOOK=${USE_WEBHOOK}
+WEBHOOK_LISTEN=0.0.0.0
+WEBHOOK_PORT=${WEBHOOK_PORT}
+WEBHOOK_PATH=${WEBHOOK_PATH}
 WEBHOOK_URL=${WEBHOOK_URL}
 WEBHOOK_SECRET=${WEBHOOK_SECRET}
-INTERNAL_PORT=${INTERNAL_PORT}
+DB_NAME=/app/data/bot.db
 EOF
   chmod 600 "$DIR/.env"
 
@@ -141,15 +147,15 @@ NAME=${BOT}
 CREATED_AT=$(now_epoch)
 EXPIRES_AT=${EXPIRES_AT}
 HOST_PORT=${HOST_PORT}
-INTERNAL_PORT=${INTERNAL_PORT}
+WEBHOOK_PORT=${WEBHOOK_PORT}
 EOF
 
   cat > "$DIR/docker-compose.yml" <<EOF
 services:
-  ${BOT}:
-    image: ${BOT}
+  wingsbot-${BOT}:
+    image: wingsbot-${BOT}
     build: ../../vendor/WINGSBOT
-    container_name: ${BOT}
+    container_name: wingsbot-${BOT}
     env_file: .env
     volumes:
       - ./data:/app/data
@@ -160,7 +166,7 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
-$( [[ "${USE_WEBHOOK,,}" == "true" ]] && printf "    ports:\n      - \"%s:%s\"\n" "${HOST_PORT}" "${INTERNAL_PORT}" )
+$( [[ "${USE_WEBHOOK,,}" == "true" ]] && printf "    ports:\n      - \"%s:%s\"\n" "${HOST_PORT}" "${WEBHOOK_PORT}" )
 EOF
 
   if command -v id >/dev/null 2>&1; then sudo chown -R "$(id -u)":"$(id -g)" "$DIR" >/dev/null 2>&1 || true; fi
@@ -171,17 +177,17 @@ EOF
 
 cmd_list(){
   ensure_dirs
-  printf "%-20s %-10s %-20s %-10s %-10s\n" "NAME" "STATUS" "EXPIRES_AT" "HOST" "INT"
+  printf "%-20s %-10s %-20s %-10s %-10s\n" "NAME" "STATUS" "EXPIRES_AT" "HOST" "WPORT"
   for d in "${BOTS_DIR}"/*; do
     [[ -d "$d" ]] || continue
     local name
     name="$(basename "$d")"
     # shellcheck source=/dev/null
     source "$d/metadata.env" 2>/dev/null || true
-    local status="stopped"; container_running "$name" && status="running"
+    local status="stopped"; container_running "wingsbot-$name" && status="running"
     local exp="${EXPIRES_AT:-0}"
     [[ "${exp:-0}" -gt 0 ]] && exp="$(epoch_to_date "$exp")" || exp="-"
-    printf "%-20s %-10s %-20s %-10s %-10s\n" "$name" "$status" "$exp" "${HOST_PORT:--}" "${INTERNAL_PORT:--}"
+    printf "%-20s %-10s %-20s %-10s %-10s\n" "$name" "$status" "$exp" "${HOST_PORT:--}" "${WEBHOOK_PORT:--}"
   done
 }
 
@@ -225,17 +231,20 @@ cmd_edit(){
   read -rp "BOT_TOKEN [${BOT_TOKEN:-}]: " v; BOT_TOKEN=${v:-${BOT_TOKEN:-}}
   read -rp "ADMIN_ID [${ADMIN_ID:-}]: " v; ADMIN_ID=${v:-${ADMIN_ID:-}}
   read -rp "CHANNEL_ID [${CHANNEL_ID:-}]: " v; CHANNEL_ID=${v:-${CHANNEL_ID:-}}
+  read -rp "CHANNEL_USERNAME [${CHANNEL_USERNAME:-}]: " v; CHANNEL_USERNAME=${v:-${CHANNEL_USERNAME:-}}
   read -rp "USE_WEBHOOK [${USE_WEBHOOK:-false}]: " v; USE_WEBHOOK=${v:-${USE_WEBHOOK:-false}}; USE_WEBHOOK=${USE_WEBHOOK,,}
 
   local WEBHOOK_URL_NEW="${WEBHOOK_URL:-}"
+  local WEBHOOK_PATH_NEW="${WEBHOOK_PATH:-}"
   local WEBHOOK_SECRET_NEW="${WEBHOOK_SECRET:-}"
-  local INTERNAL_PORT_NEW="${INTERNAL_PORT:-$DEFAULT_INTERNAL_PORT}"
+  local WEBHOOK_PORT_NEW="${WEBHOOK_PORT:-$DEFAULT_WEBHOOK_PORT}"
   local HOST_PORT_NEW="${HOST_PORT:-}"
 
   if [[ "$USE_WEBHOOK" == "true" ]]; then
     read -rp "WEBHOOK_URL [${WEBHOOK_URL_NEW}]: " v; WEBHOOK_URL_NEW=${v:-$WEBHOOK_URL_NEW}
+    read -rp "WEBHOOK_PATH [${WEBHOOK_PATH_NEW}]: " v; WEBHOOK_PATH_NEW=${v:-$WEBHOOK_PATH_NEW}
+    read -rp "WEBHOOK_PORT [${WEBHOOK_PORT_NEW}]: " v; WEBHOOK_PORT_NEW=${v:-$WEBHOOK_PORT_NEW}
     read -rp "WEBHOOK_SECRET [${WEBHOOK_SECRET_NEW}]: " v; WEBHOOK_SECRET_NEW=${v:-$WEBHOOK_SECRET_NEW}
-    read -rp "INTERNAL_PORT [${INTERNAL_PORT_NEW}]: " v; INTERNAL_PORT_NEW=${v:-$INTERNAL_PORT_NEW}
     read -rp "Auto-assign HOST_PORT? [Y/n] (current: ${HOST_PORT_NEW:-none}): " v; v=${v:-Y}
     if [[ "${v,,}" == "y" ]]; then
       HOST_PORT_NEW="$(pick_free_port)" || die "No free host ports in ${PORT_RANGE_START}-${PORT_RANGE_END}"
@@ -252,10 +261,14 @@ cmd_edit(){
 BOT_TOKEN=${BOT_TOKEN}
 ADMIN_ID=${ADMIN_ID}
 CHANNEL_ID=${CHANNEL_ID}
+CHANNEL_USERNAME=${CHANNEL_USERNAME}
 USE_WEBHOOK=${USE_WEBHOOK}
+WEBHOOK_LISTEN=0.0.0.0
+WEBHOOK_PORT=${WEBHOOK_PORT_NEW}
+WEBHOOK_PATH=${WEBHOOK_PATH_NEW}
 WEBHOOK_URL=${WEBHOOK_URL_NEW}
 WEBHOOK_SECRET=${WEBHOOK_SECRET_NEW}
-INTERNAL_PORT=${INTERNAL_PORT_NEW}
+DB_NAME=/app/data/bot.db
 EOF
   chmod 600 "${dir}/.env"
 
@@ -268,16 +281,16 @@ NAME=${NAME_VAL}
 CREATED_AT=${CREATED_VAL}
 EXPIRES_AT=${EXPIRES_VAL}
 HOST_PORT=${HOST_PORT_NEW}
-INTERNAL_PORT=${INTERNAL_PORT_NEW}
+WEBHOOK_PORT=${WEBHOOK_PORT_NEW}
 EOF
 
   # Rewrite compose
   cat > "${dir}/docker-compose.yml" <<EOF
 services:
-  ${bot}:
-    image: ${bot}
+  wingsbot-${bot}:
+    image: wingsbot-${bot}
     build: ../../vendor/WINGSBOT
-    container_name: ${bot}
+    container_name: wingsbot-${bot}
     env_file: .env
     volumes:
       - ./data:/app/data
@@ -288,7 +301,7 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
-$( [[ "$USE_WEBHOOK" == "true" ]] && printf "    ports:\n      - \"%s:%s\"\n" "${HOST_PORT_NEW}" "${INTERNAL_PORT_NEW}" )
+$( [[ "$USE_WEBHOOK" == "true" ]] && printf "    ports:\n      - \"%s:%s\"\n" "${HOST_PORT_NEW}" "${WEBHOOK_PORT_NEW}" )
 EOF
 
   if command -v id >/dev/null 2>&1; then sudo chown -R "$(id -u)":"$(id -g)" "$dir" >/dev/null 2>&1 || true; fi
