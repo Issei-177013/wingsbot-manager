@@ -45,7 +45,13 @@ ensure_repo(){
   fi
 }
 
-compose_cmd(){ docker compose "$@"; }
+compose_cmd(){
+  if docker buildx version >/dev/null 2>&1; then
+    docker compose "$@"
+  else
+    COMPOSE_DOCKER_CLI_BUILD=0 DOCKER_BUILDKIT=0 docker compose "$@"
+  fi
+}
 container_running(){ local name="$1"; docker ps --format '{{.Names}}' | grep -Fxq "$name"; }
 
 pick_free_port(){
