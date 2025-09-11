@@ -3,7 +3,14 @@ set -euo pipefail
 
 # === Config ===
 REPO_URL="https://github.com/Issei-177013/WINGSBOT.git"
-MANAGER_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Resolve script directory even when invoked via symlink
+SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+MANAGER_ROOT="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 VENDOR_DIR="${MANAGER_ROOT}/vendor"
 REPO_DIR="${VENDOR_DIR}/WINGSBOT"
 BOTS_DIR="${MANAGER_ROOT}/bots"
@@ -159,20 +166,201 @@ cmd_list(){
 }
 
 cmd_info(){ local bot="${1:-}"; [[ -n "$bot" ]] || { read -rp "Bot name: " bot; }; local dir="${BOTS_DIR}/${bot}"; [[ -d "$dir" ]] || die "Bot not found: $bot"; echo "# ${bot}"; echo "Path: ${dir}"; echo "- .env"; sed -n '1,200p' "${dir}/.env"; echo "- metadata"; sed -n '1,200p' "${dir}/metadata.env"; echo "- compose"; sed -n '1,200p' "${dir}/docker-compose.yml"; }
-cmd_start(){ local bot="${1:-}"; [[ -n "$bot" ]] || { read -rp "Bot name: " bot; }; compose_up "$bot"; }
+cmd_start(){
+  local bot="${1:-}"; [[ -n "$bot" ]] || { read -rp "Bot name: " bot; }
+  local dir="${BOTS_DIR}/${bot}"; [[ -d "$dir" ]] || die "Bot not found: $bot"
+  # Prevent starting expired bots
+  source "${dir}/metadata.env" 2>/dev/null || true
+  local now; now="$(now_epoch)"
+  local exp="${EXPIRES_AT:-0}"
+  if [[ "$exp" -gt 0 && "$now" -ge "$exp" ]]; then
+    die "Bot '${bot}' is expired. Renew before starting."
+  fi
+  compose_up "$bot"
+}
 cmd_stop(){  local bot="${1:-}"; [[ -n "$bot" ]] || { read -rp "Bot name: " bot; }; compose_down "$bot"; }
-cmd_restart(){ local bot="${1:-}"; [[ -n "$bot" ]] || { read -rp "Bot name: " bot; }; compose_down "$bot"; compose_up "$bot"; }
+cmd_restart(){
+  local bot="${1:-}"; [[ -n "$bot" ]] || { read -rp "Bot name: " bot; }
+  cmd_stop "$bot" || true
+  cmd_start "$bot"
+}
 cmd_logs(){ local bot="${1:-}"; [[ -n "$bot" ]] || { read -rp "Bot name: " bot; }; (cd "${BOTS_DIR}/$bot" && compose_cmd logs -f); }
 
 cmd_rm(){ local bot="${1:-}"; [[ -n "$bot" ]] || { read -rp "Bot name to remove: " bot; }; local dir="${BOTS_DIR}/${bot}"; [[ -d "$dir" ]] || die "Bot not found: $bot"; compose_down "$bot" || true; rm -rf "$dir"; green "Removed bot '${bot}'."; }
 
-cmd_set_expiry(){ local bot="$1"; local val="${2:-}"; [[ -n "$bot" && -n "$val" ]] || die "Usage: $0 set-expiry <bot> <days|YYYY-MM-DD>"; local dir="${BOTS_DIR}/${bot}"; [[ -d "$dir" ]] || die "Bot not found: $bot"; local epoch="0"; if [[ "$val" =~ ^[0-9]+$ ]]; then epoch="$(add_days_epoch "$val")"; else epoch="$(date_to_epoch "$val")"; fi; [[ "$epoch" -gt 0 ]] || die "Invalid expiry"; sed -i -E "s/^EXPIRES_AT=.*/EXPIRES_AT=${epoch}/" "${dir}/metadata.env"; green "Expiry set: $(epoch_to_date "$epoch")"; }
+# Edit a bot's configuration (.env, ports) and restart
+cmd_edit(){
+  local bot="${1:-}"; [[ -n "$bot" ]] || { read -rp "Bot name to edit: " bot; }
+  local dir="${BOTS_DIR}/${bot}"; [[ -d "$dir" ]] || die "Bot not found: $bot"
+
+  # Load current values
+  source "${dir}/.env" 2>/dev/null || true
+  source "${dir}/metadata.env" 2>/dev/null || true
+
+  echo "-- Edit config (leave blank to keep current) --"
+  local v
+  read -rp "BOT_TOKEN [${BOT_TOKEN:-}]: " v; BOT_TOKEN=${v:-${BOT_TOKEN:-}}
+  read -rp "ADMIN_ID [${ADMIN_ID:-}]: " v; ADMIN_ID=${v:-${ADMIN_ID:-}}
+  read -rp "CHANNEL_ID [${CHANNEL_ID:-}]: " v; CHANNEL_ID=${v:-${CHANNEL_ID:-}}
+  read -rp "USE_WEBHOOK [${USE_WEBHOOK:-false}]: " v; USE_WEBHOOK=${v:-${USE_WEBHOOK:-false}}; USE_WEBHOOK=${USE_WEBHOOK,,}
+
+  local WEBHOOK_URL_NEW="${WEBHOOK_URL:-}"
+  local WEBHOOK_SECRET_NEW="${WEBHOOK_SECRET:-}"
+  local INTERNAL_PORT_NEW="${INTERNAL_PORT:-$DEFAULT_INTERNAL_PORT}"
+  local HOST_PORT_NEW="${HOST_PORT:-}"
+
+  if [[ "$USE_WEBHOOK" == "true" ]]; then
+    read -rp "WEBHOOK_URL [${WEBHOOK_URL_NEW}]: " v; WEBHOOK_URL_NEW=${v:-$WEBHOOK_URL_NEW}
+    read -rp "WEBHOOK_SECRET [${WEBHOOK_SECRET_NEW}]: " v; WEBHOOK_SECRET_NEW=${v:-$WEBHOOK_SECRET_NEW}
+    read -rp "INTERNAL_PORT [${INTERNAL_PORT_NEW}]: " v; INTERNAL_PORT_NEW=${v:-$INTERNAL_PORT_NEW}
+    read -rp "Auto-assign HOST_PORT? [Y/n] (current: ${HOST_PORT_NEW:-none}): " v; v=${v:-Y}
+    if [[ "${v,,}" == "y" ]]; then
+      HOST_PORT_NEW="$(pick_free_port)" || die "No free host ports in ${PORT_RANGE_START}-${PORT_RANGE_END}"
+      green "Selected HOST_PORT: $HOST_PORT_NEW"
+    else
+      read -rp "HOST_PORT [${HOST_PORT_NEW}]: " v; HOST_PORT_NEW=${v:-$HOST_PORT_NEW}
+    fi
+  else
+    HOST_PORT_NEW=""
+  fi
+
+  # Rewrite .env
+  cat > "${dir}/.env" <<EOF
+BOT_TOKEN=${BOT_TOKEN}
+ADMIN_ID=${ADMIN_ID}
+CHANNEL_ID=${CHANNEL_ID}
+USE_WEBHOOK=${USE_WEBHOOK}
+WEBHOOK_URL=${WEBHOOK_URL_NEW}
+WEBHOOK_SECRET=${WEBHOOK_SECRET_NEW}
+INTERNAL_PORT=${INTERNAL_PORT_NEW}
+EOF
+  chmod 600 "${dir}/.env"
+
+  # Preserve NAME/CREATED_AT/EXPIRES_AT, update ports
+  local NAME_VAL="${NAME:-$bot}"
+  local CREATED_VAL="${CREATED_AT:-$(now_epoch)}"
+  local EXPIRES_VAL="${EXPIRES_AT:-0}"
+  cat > "${dir}/metadata.env" <<EOF
+NAME=${NAME_VAL}
+CREATED_AT=${CREATED_VAL}
+EXPIRES_AT=${EXPIRES_VAL}
+HOST_PORT=${HOST_PORT_NEW}
+INTERNAL_PORT=${INTERNAL_PORT_NEW}
+EOF
+
+  # Rewrite compose
+  cat > "${dir}/docker-compose.yml" <<EOF
+services:
+  ${bot}:
+    build: ../../vendor/WINGSBOT
+    container_name: ${bot}
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+$( [[ "$USE_WEBHOOK" == "true" ]] && printf "    ports:\n      - \"%s:%s\"\n" "${HOST_PORT_NEW}" "${INTERNAL_PORT_NEW}" )
+EOF
+
+  if command -v id >/dev/null 2>&1; then sudo chown -R "$(id -u)":"$(id -g)" "$dir" >/dev/null 2>&1 || true; fi
+  compose_down "$bot" || true
+  compose_up "$bot"
+  green "Bot '${bot}' updated and restarted."
+}
+
+cmd_set_expiry(){
+  local bot="$1"; local val="${2:-}"
+  [[ -n "$bot" && -n "$val" ]] || die "Usage: $0 set-expiry <bot> <days|YYYY-MM-DD|0|none>"
+  local dir="${BOTS_DIR}/${bot}"; [[ -d "$dir" ]] || die "Bot not found: $bot"
+  local epoch="0"
+  case "${val,,}" in
+    0|none|never) epoch=0 ;;
+    *)
+      if [[ "$val" =~ ^[0-9]+$ ]]; then
+        if [[ "$val" -gt 0 ]]; then epoch="$(add_days_epoch "$val")"; else epoch=0; fi
+      else
+        epoch="$(date_to_epoch "$val")"
+      fi
+      ;;
+  esac
+  if [[ "$epoch" -gt 0 ]]; then
+    sed -i -E "s/^EXPIRES_AT=.*/EXPIRES_AT=${epoch}/" "${dir}/metadata.env"
+    green "Expiry set: $(epoch_to_date "$epoch")"
+  else
+    sed -i -E "s/^EXPIRES_AT=.*/EXPIRES_AT=0/" "${dir}/metadata.env"
+    green "Expiry disabled (no expiry)."
+  fi
+}
 
 cmd_renew(){ local bot="$1"; local days="${2:-}"; [[ -n "$bot" && -n "$days" ]] || die "Usage: $0 renew <bot> <days>"; local dir="${BOTS_DIR}/${bot}"; [[ -d "$dir" ]] || die "Bot not found: $bot"; source "${dir}/metadata.env" || true; local base="${EXPIRES_AT:-0}"; [[ "$base" -lt "$(now_epoch)" ]] && base="$(now_epoch)"; local new=$(( base + days*86400 )); sed -i -E "s/^EXPIRES_AT=.*/EXPIRES_AT=${new}/" "${dir}/metadata.env"; green "Renewed until: $(epoch_to_date "$new")"; }
 
 cmd_check_expiry(){ ensure_dirs; local now; now="$(now_epoch)"; for d in "${BOTS_DIR}"/*; do [[ -d "$d" ]] || continue; source "${d}/metadata.env" 2>/dev/null || true; local name="$(basename "$d")"; local exp="${EXPIRES_AT:-0}"; if [[ "$exp" -gt 0 && "$now" -ge "$exp" ]]; then if container_running "$name"; then yellow "Stopping expired bot: ${name}"; compose_down "$name" || true; fi; fi; done }
 
 cmd_update_vendor(){ ensure_dirs; ensure_repo; green "Vendor updated."; }
+
+# === Manager self-update ===
+cmd_self_update(){
+  local dir="${MANAGER_ROOT}"
+  [[ -d "$dir/.git" ]] || die "Manager directory is not a git repo: $dir. Reinstall via installer."
+  green "Updating manager at ${dir}"
+  if git -C "$dir" pull --ff-only; then
+    green "Manager updated. Restart the tool to use latest code."
+  else
+    if command -v sudo >/dev/null 2>&1 && [[ ${EUID:-$(id -u)} -ne 0 ]]; then
+      yellow "Retrying with sudo..."
+      sudo git -C "$dir" pull --ff-only || die "sudo git pull failed."
+      green "Manager updated with sudo. Restart the tool to use latest code."
+    else
+      die "git pull failed. Check permissions for: $dir"
+    fi
+  fi
+}
+
+# Rebuild a single bot (compose down + up --build), skip if expired
+cmd_rebuild(){
+  local bot="${1:-}"; [[ -n "$bot" ]] || { read -rp "Bot name to rebuild: " bot; }
+  local dir="${BOTS_DIR}/${bot}"; [[ -d "$dir" ]] || die "Bot not found: $bot"
+  source "${dir}/metadata.env" 2>/dev/null || true
+  local now; now="$(now_epoch)"; local exp="${EXPIRES_AT:-0}"
+  if [[ "$exp" -gt 0 && "$now" -ge "$exp" ]]; then
+    yellow "Skip rebuild (expired): ${bot}"
+    return 0
+  fi
+  compose_down "$bot" || true
+  compose_up "$bot"
+  green "Rebuilt bot '${bot}'."
+}
+
+# Rebuild all non-expired bots
+cmd_rebuild_all(){
+  ensure_dirs
+  local count=0; local skipped=0
+  for d in "${BOTS_DIR}"/*; do
+    [[ -d "$d" ]] || continue
+    local name; name="$(basename "$d")"
+    # shellcheck disable=SC1090
+    source "$d/metadata.env" 2>/dev/null || true
+    local now; now="$(now_epoch)"; local exp="${EXPIRES_AT:-0}"
+    if [[ "$exp" -gt 0 && "$now" -ge "$exp" ]]; then
+      yellow "Skip rebuild (expired): ${name}"; ((skipped++)); continue
+    fi
+    compose_down "$name" || true
+    compose_up "$name"
+    ((count++))
+  done
+  green "Rebuilt $count bot(s). Skipped $skipped expired."
+}
+
+# Update vendor and rebuild all non-expired bots
+cmd_update_all(){
+  cmd_update_vendor
+  cmd_rebuild_all
+}
 
 # === Menus ===
 select_bot(){
@@ -192,10 +380,11 @@ menu_manage_bot(){
     echo " 3) Restart"
     echo " 4) Logs"
     echo " 5) Info"
-    echo " 6) Set expiry"
-    echo " 7) Renew"
-    echo " 8) Remove"
-    echo " 9) Back"
+    echo " 6) Edit config"
+    echo " 7) Set expiry"
+    echo " 8) Renew"
+    echo " 9) Remove"
+    echo "10) Back"
     read -rp "Choose: " a
     case "$a" in
       1) cmd_start "$bot";;
@@ -203,10 +392,11 @@ menu_manage_bot(){
       3) cmd_restart "$bot";;
       4) cmd_logs "$bot";;
       5) cmd_info "$bot";;
-      6) read -rp "Expiry (days or YYYY-MM-DD): " v; cmd_set_expiry "$bot" "$v";;
-      7) read -rp "Days to extend: " d; cmd_renew "$bot" "$d";;
-      8) read -rp "Type the bot name to confirm removal: " c; [[ "$c" == "$bot" ]] && cmd_rm "$bot" && break || echo "Cancelled.";;
-      9) break;;
+      6) cmd_edit "$bot";;
+      7) read -rp "Expiry (days or YYYY-MM-DD): " v; cmd_set_expiry "$bot" "$v";;
+      8) read -rp "Days to extend: " d; cmd_renew "$bot" "$d";;
+      9) read -rp "Type the bot name to confirm removal: " c; [[ "$c" == "$bot" ]] && cmd_rm "$bot" && break || echo "Cancelled.";;
+     10) break;;
       *) echo "Invalid";;
     esac
     action_pause
@@ -215,8 +405,8 @@ menu_manage_bot(){
 
 install_cron(){
   local bin; bin="$(command -v wingsbot-manager || true)"; [[ -n "$bin" ]] || bin="${MANAGER_ROOT}/wingsbot-manager"
-  (crontab -l 2>/dev/null | grep -v 'wingsbot-manager check-expiry' || true; echo "*/5 * * * * ${bin} check-expiry >/dev/null 2>&1") | crontab -
-  green "Cron installed (every 5 minutes)."
+  (crontab -l 2>/dev/null | grep -v 'wingsbot-manager check-expiry' || true; echo "0 */12 * * * ${bin} check-expiry >/dev/null 2>&1") | crontab -
+  green "Cron installed (every 12 hours)."
 }
 remove_cron(){ crontab -l 2>/dev/null | grep -v 'wingsbot-manager check-expiry' | crontab - || true; green "Cron removed."; }
 
@@ -227,14 +417,22 @@ menu_housekeeping(){
     echo " 2) Install cron (check-expiry)"
     echo " 3) Remove cron"
     echo " 4) Update vendored fork"
-    echo " 5) Back"
+    echo " 5) Rebuild a bot"
+    echo " 6) Rebuild all (non-expired)"
+    echo " 7) Update vendor + rebuild all"
+    echo " 8) Self-update manager"
+    echo " 9) Back"
     read -rp "Choose: " a
     case "$a" in
       1) cmd_check_expiry;;
       2) install_cron;;
       3) remove_cron;;
       4) cmd_update_vendor;;
-      5) break;;
+      5) read -rp "Bot name: " b; cmd_rebuild "$b";;
+      6) cmd_rebuild_all;;
+      7) cmd_update_all;;
+      8) cmd_self_update;;
+      9) break;;
       *) echo "Invalid";;
     esac
     action_pause
@@ -275,10 +473,15 @@ case "$cmd" in
   restart)         cmd_restart "${1:-}";;
   logs)            cmd_logs "${1:-}";;
   rm)              cmd_rm "${1:-}";;
+  edit)            cmd_edit "${1:-}";;
+  rebuild)         cmd_rebuild "${1:-}";;
+  rebuild-all)     cmd_rebuild_all;;
+  update-all)      cmd_update_all;;
   set-expiry)      cmd_set_expiry "${1:-}" "${2:-}";;
   renew)           cmd_renew "${1:-}" "${2:-}";;
   check-expiry)    cmd_check_expiry;;
   update-vendor)   cmd_update_vendor;;
-  help|--help|-h)  echo "Use: wingsbot-manager [menu|create|list|info|start|stop|restart|logs|rm|set-expiry|renew|check-expiry|update-vendor]";;
+  self-update)     cmd_self_update;;
+  help|--help|-h)  echo "Use: wingsbot-manager [menu|create|list|info|start|stop|restart|logs|rm|edit|rebuild|rebuild-all|update-all|set-expiry|renew|check-expiry|update-vendor|self-update]";;
   *)               menu_main;;
 esac

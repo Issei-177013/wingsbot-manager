@@ -36,6 +36,11 @@ wingsbot-manager
 wingsbot-manager create mybot
 wingsbot-manager list
 wingsbot-manager logs mybot
+wingsbot-manager edit mybot
+wingsbot-manager rebuild mybot        # rebuild from latest vendor code
+wingsbot-manager rebuild-all          # rebuild all non-expired bots
+wingsbot-manager update-all           # update vendor + rebuild all
+wingsbot-manager self-update          # update the manager itself (git pull)
 wingsbot-manager set-expiry mybot 30
 wingsbot-manager renew mybot 15
 ```
@@ -48,10 +53,15 @@ wingsbot-manager renew mybot 15
 - `start|stop|restart <name>`: lifecycle
 - `logs <name>`: tail logs
 - `rm <name>`: stop and remove a bot directory
-- `set-expiry <name> <days|YYYY-MM-DD>`: set/override expiry
+- `edit <name>`: interactively update bot config (.env, ports); restarts the bot
+- `rebuild <name>`: rebuild a bot from vendored code (down + up --build)
+- `rebuild-all`: rebuild all non-expired bots
+- `update-all`: update vendored fork then rebuild all non-expired bots
+- `set-expiry <name> <days|YYYY-MM-DD|0|none>`: set/override expiry (`0`/`none` disables)
 - `renew <name> <days>`: extend expiry by N days
 - `check-expiry`: stop any expired bots (use in cron)
 - `update-vendor`: pull latest code for your vendored fork
+- `self-update`: update the manager repo itself
 
 ## Defaults (editable at top of script)
 - Internal port (webhook): `9090`
