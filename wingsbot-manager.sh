@@ -567,8 +567,9 @@ menu_housekeeping(){
     echo " 5) Rebuild a bot"
     echo " 6) Rebuild all (non-expired)"
     echo " 7) Update vendor + rebuild all"
-    echo " 8) Self-update manager"
-    echo " 9) Back"
+    echo " 8) Admin control bot"
+    echo " 9) Self-update manager"
+    echo "10) Back"
     read -rp "Choose: " a
     case "$a" in
       1) cmd_check_expiry;;
@@ -578,7 +579,37 @@ menu_housekeeping(){
       5) read -rp "Bot name: " b; cmd_rebuild "$b";;
       6) cmd_rebuild_all;;
       7) cmd_update_all;;
-      8) cmd_self_update;;
+      8) menu_admin_bot;;
+      9) cmd_self_update;;
+     10) break;;
+      *) echo "Invalid";;
+    esac
+    action_pause
+  done
+}
+
+menu_admin_bot(){
+  while true; do
+    echo -e "\n[Admin Control Bot]"
+    echo " 1) Install"
+    echo " 2) Start"
+    echo " 3) Stop"
+    echo " 4) Restart"
+    echo " 5) Status"
+    echo " 6) Logs"
+    echo " 7) Edit config"
+    echo " 8) Uninstall"
+    echo " 9) Back"
+    read -rp "Choose: " a
+    case "$a" in
+      1) cmd_admin_bot_install;;
+      2) cmd_admin_bot_start;;
+      3) cmd_admin_bot_stop;;
+      4) cmd_admin_bot_restart;;
+      5) cmd_admin_bot_status;;
+      6) cmd_admin_bot_logs;;
+      7) cmd_admin_bot_edit;;
+      8) cmd_admin_bot_uninstall;;
       9) break;;
       *) echo "Invalid";;
     esac
