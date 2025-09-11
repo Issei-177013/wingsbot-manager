@@ -70,7 +70,13 @@ pick_free_port(){
 compose_up(){
   local bot="$1"
   local dir="${BOTS_DIR}/${bot}"
-  (cd "$dir" && compose_cmd up -d --build)
+  if docker buildx version >/dev/null 2>&1; then
+    (cd "$dir" && compose_cmd up -d --build)
+  else
+    yellow "docker buildx plugin not found; falling back to 'docker build' + compose --no-build"
+    docker build -t "$bot" "$REPO_DIR"
+    (cd "$dir" && compose_cmd up -d --no-build)
+  fi
 }
 compose_down(){
   local bot="$1"
@@ -139,6 +145,7 @@ EOF
   cat > "$DIR/docker-compose.yml" <<EOF
 services:
   ${BOT}:
+    image: ${BOT}
     build: ../../vendor/WINGSBOT
     container_name: ${BOT}
     env_file: .env
@@ -266,6 +273,7 @@ EOF
   cat > "${dir}/docker-compose.yml" <<EOF
 services:
   ${bot}:
+    image: ${bot}
     build: ../../vendor/WINGSBOT
     container_name: ${bot}
     env_file: .env

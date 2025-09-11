@@ -43,6 +43,13 @@ if ! docker compose version >/dev/null 2>&1; then
   DEBIAN_FRONTEND=noninteractive apt-get install -y docker-compose-plugin || true
 fi
 
+# Ensure docker buildx plugin is available (Compose uses it for builds)
+if ! docker buildx version >/dev/null 2>&1; then
+  echo "[*] Installing docker-buildx-plugin from Ubuntu repo..."
+  apt-get update -y
+  DEBIAN_FRONTEND=noninteractive apt-get install -y docker-buildx-plugin || true
+fi
+
 # If compose plugin still missing, set up official Docker repo and install CE + plugins
 if ! docker compose version >/dev/null 2>&1; then
   echo "[*] docker-compose-plugin not found. Setting up official Docker APT repository..."
@@ -66,6 +73,20 @@ if ! docker compose version >/dev/null 2>&1; then
     DEBIAN_FRONTEND=noninteractive apt-get install -y \
       docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
   fi
+fi
+
+# If buildx plugin still missing, also install it from Docker repo
+if ! docker buildx version >/dev/null 2>&1; then
+  echo "[*] docker-buildx-plugin not found. Ensuring Docker APT repository and installing..."
+  install -m 0755 -d /etc/apt/keyrings
+  curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+  chmod a+r /etc/apt/keyrings/docker.gpg
+  # shellcheck source=/etc/os-release
+  . /etc/os-release
+  echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu ${VERSION_CODENAME} stable" \
+    > /etc/apt/sources.list.d/docker.list
+  apt-get update -y
+  DEBIAN_FRONTEND=noninteractive apt-get install -y docker-buildx-plugin
 fi
 
 echo "[*] Enabling & starting Docker..."
