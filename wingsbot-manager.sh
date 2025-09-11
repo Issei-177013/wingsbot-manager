@@ -73,6 +73,50 @@ pick_free_port(){
   return 1
 }
 
+# Regenerate compose and metadata from current .env and metadata
+regen_compose(){
+  local bot="$1"
+  local dir="${BOTS_DIR}/${bot}"
+  [[ -d "$dir" ]] || die "Bot not found: $bot"
+  # shellcheck source=/dev/null
+  source "$dir/.env" 2>/dev/null || true
+  # shellcheck source=/dev/null
+  source "$dir/metadata.env" 2>/dev/null || true
+
+  local NAME_VAL="${NAME:-$bot}"
+  local CREATED_VAL="${CREATED_AT:-$(now_epoch)}"
+  local EXPIRES_VAL="${EXPIRES_AT:-0}"
+  local HOST_PORT_VAL="${HOST_PORT:-}"
+  local WEBHOOK_PORT_VAL="${WEBHOOK_PORT:-$DEFAULT_WEBHOOK_PORT}"
+  local USE_WEBHOOK_VAL="${USE_WEBHOOK:-false}"
+
+  cat > "$dir/metadata.env" <<EOF
+NAME=${NAME_VAL}
+CREATED_AT=${CREATED_VAL}
+EXPIRES_AT=${EXPIRES_VAL}
+HOST_PORT=${HOST_PORT_VAL}
+WEBHOOK_PORT=${WEBHOOK_PORT_VAL}
+EOF
+
+  cat > "$dir/docker-compose.yml" <<EOF
+services:
+  wingsbot-${bot}:
+    image: wingsbot-${bot}
+    container_name: wingsbot-${bot}
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+$( [[ "${USE_WEBHOOK_VAL,,}" == "true" ]] && printf "    ports:\n      - \"%s:%s\"\n" "${HOST_PORT_VAL}" "${WEBHOOK_PORT_VAL}" )
+EOF
+}
+
 compose_up(){
   local bot="$1"
   local dir="${BOTS_DIR}/${bot}"
@@ -154,7 +198,6 @@ EOF
 services:
   wingsbot-${BOT}:
     image: wingsbot-${BOT}
-    build: ../../vendor/WINGSBOT
     container_name: wingsbot-${BOT}
     env_file: .env
     volumes:
@@ -212,6 +255,9 @@ cmd_restart(){
   cmd_start "$bot"
 }
 cmd_logs(){ local bot="${1:-}"; [[ -n "$bot" ]] || { read -rp "Bot name: " bot; }; (cd "${BOTS_DIR}/$bot" && compose_cmd logs -f); }
+
+# Logs once (non-follow) for bots; useful for non-interactive callers
+cmd_logs_once(){ local bot="${1:-}"; [[ -n "$bot" ]] || { read -rp "Bot name: " bot; }; (cd "${BOTS_DIR}/$bot" && compose_cmd logs --tail 200); }
 
 cmd_rm(){ local bot="${1:-}"; [[ -n "$bot" ]] || { read -rp "Bot name to remove: " bot; }; local dir="${BOTS_DIR}/${bot}"; [[ -d "$dir" ]] || die "Bot not found: $bot"; compose_down "$bot" || true; rm -rf "$dir"; green "Removed bot '${bot}'."; }
 
@@ -289,7 +335,6 @@ EOF
 services:
   wingsbot-${bot}:
     image: wingsbot-${bot}
-    build: ../../vendor/WINGSBOT
     container_name: wingsbot-${bot}
     env_file: .env
     volumes:
@@ -506,6 +551,127 @@ menu_housekeeping(){
   done
 }
 
+# Get/Set/Unset .env values for a bot
+cmd_get_env(){
+  local bot="$1"; local key="${2:-}"
+  local dir="${BOTS_DIR}/${bot}"; [[ -d "$dir" ]] || die "Bot not found: $bot"
+  if [[ -z "$key" ]]; then
+    sed -n '1,200p' "$dir/.env"
+  else
+    grep -E "^${key}=" "$dir/.env" || true
+  fi
+}
+
+cmd_set_env(){
+  local bot="$1"; local key="$2"; local value="$3"; local norestart="${4:-}"
+  [[ -n "$bot" && -n "$key" && -n "$value" ]] || die "Usage: $0 set-env <bot> <KEY> <VALUE> [--no-restart]"
+  local dir="${BOTS_DIR}/${bot}"; [[ -d "$dir" ]] || die "Bot not found: $bot"
+  touch "$dir/.env"
+  if grep -qE "^${key}=" "$dir/.env"; then
+    sed -i -E "s|^${key}=.*|${key}=${value}|" "$dir/.env"
+  else
+    echo "${key}=${value}" >> "$dir/.env"
+  fi
+  case "$key" in
+    USE_WEBHOOK|WEBHOOK_PORT|WEBHOOK_URL|WEBHOOK_PATH|WEBHOOK_SECRET|DB_NAME) regen_compose "$bot";;
+  esac
+  if [[ "$norestart" != "--no-restart" ]]; then cmd_restart "$bot"; fi
+  green "Set ${key} for ${bot}."
+}
+
+cmd_unset_env(){
+  local bot="$1"; local key="$2"; local norestart="${3:-}"
+  [[ -n "$bot" && -n "$key" ]] || die "Usage: $0 unset-env <bot> <KEY> [--no-restart]"
+  local dir="${BOTS_DIR}/${bot}"; [[ -d "$dir" ]] || die "Bot not found: $bot"
+  if [[ -f "$dir/.env" ]]; then
+    sed -i -E "/^${key}=.*/d" "$dir/.env"
+  fi
+  case "$key" in
+    USE_WEBHOOK|WEBHOOK_PORT|WEBHOOK_URL|WEBHOOK_PATH|WEBHOOK_SECRET|DB_NAME) regen_compose "$bot";;
+  esac
+  if [[ "$norestart" != "--no-restart" ]]; then cmd_restart "$bot"; fi
+  green "Unset ${key} for ${bot}."
+}
+
+# Update host port in metadata and compose
+cmd_set_host_port(){
+  local bot="$1"; local val="$2"; [[ -n "$bot" && -n "$val" ]] || die "Usage: $0 set-host-port <bot> <auto|PORT>"
+  local dir="${BOTS_DIR}/${bot}"; [[ -d "$dir" ]] || die "Bot not found: $bot"
+  local port
+  if [[ "$val" == "auto" ]]; then
+    port="$(pick_free_port)" || die "No free ports available"
+  else
+    [[ "$val" =~ ^[0-9]+$ ]] || die "Invalid port"
+    port="$val"
+  fi
+  if grep -qE '^HOST_PORT=' "$dir/metadata.env"; then
+    sed -i -E "s/^HOST_PORT=.*/HOST_PORT=${port}/" "$dir/metadata.env"
+  else
+    echo "HOST_PORT=${port}" >> "$dir/metadata.env"
+  fi
+  regen_compose "$bot"
+  cmd_restart "$bot"
+  green "Host port for ${bot} set to ${port}."
+}
+
+# === Admin Control Bot (Telegram) ===
+ADMIN_BOT_DIR="${MANAGER_ROOT}/manager_bot"
+ADMIN_BOT_ENV="${ADMIN_BOT_DIR}/.env"
+ADMIN_BOT_VENV="${ADMIN_BOT_DIR}/.venv"
+ADMIN_BOT_SERVICE="/etc/systemd/system/wingsbot-admin.service"
+
+cmd_admin_bot_install(){
+  need_cmd python3; need_cmd pip3
+  if ! python3 -m venv --help >/dev/null 2>&1; then
+    yellow "python3-venv not found; attempting to install..."
+    if command -v apt-get >/dev/null 2>&1; then
+      sudo apt-get update -y && sudo apt-get install -y python3-venv || true
+    fi
+  fi
+  mkdir -p "$ADMIN_BOT_DIR"
+  if [[ ! -f "$ADMIN_BOT_ENV" ]]; then
+    echo "Creating $ADMIN_BOT_ENV"
+    read -rp "MANAGER_BOT_TOKEN: " tkn
+    read -rp "ADMIN_IDS (comma separated): " aids
+    cat > "$ADMIN_BOT_ENV" <<EOF
+MANAGER_BOT_TOKEN=${tkn}
+ADMIN_IDS=${aids}
+WINGS_MANAGER_BIN=$(command -v wingsbot-manager || echo ${MANAGER_ROOT}/wingsbot-manager.sh)
+EOF
+  fi
+  python3 -m venv "$ADMIN_BOT_VENV"
+  "${ADMIN_BOT_VENV}/bin/pip" install --upgrade pip
+  "${ADMIN_BOT_VENV}/bin/pip" install -r "${ADMIN_BOT_DIR}/requirements.txt"
+  # Create systemd service
+  sudo bash -c "cat > '$ADMIN_BOT_SERVICE'" <<EOF
+[Unit]
+Description=WINGS Manager Telegram Control Bot
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=${ADMIN_BOT_DIR}
+EnvironmentFile=${ADMIN_BOT_ENV}
+ExecStart=${ADMIN_BOT_VENV}/bin/python ${ADMIN_BOT_DIR}/bot.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  sudo systemctl daemon-reload
+  sudo systemctl enable --now wingsbot-admin.service
+  green "Admin bot installed and started. Use: systemctl status wingsbot-admin"
+}
+
+cmd_admin_bot_start(){ sudo systemctl start wingsbot-admin.service; systemctl --no-pager --full status wingsbot-admin.service || true; }
+cmd_admin_bot_stop(){ sudo systemctl stop wingsbot-admin.service; green "Stopped."; }
+cmd_admin_bot_restart(){ sudo systemctl restart wingsbot-admin.service; green "Restarted."; }
+cmd_admin_bot_status(){ systemctl --no-pager --full status wingsbot-admin.service || true; }
+cmd_admin_bot_logs(){ journalctl -u wingsbot-admin.service -n 200 --no-pager || true; }
+cmd_admin_bot_edit(){ ${EDITOR:-nano} "$ADMIN_BOT_ENV"; }
+cmd_admin_bot_uninstall(){ sudo systemctl disable --now wingsbot-admin.service || true; sudo rm -f "$ADMIN_BOT_SERVICE"; sudo systemctl daemon-reload; green "Admin bot uninstalled."; }
+
 menu_main(){
   while true; do
     echo -e "\n=== wingsbot-manager ==="
@@ -539,16 +705,22 @@ case "$cmd" in
   stop)            cmd_stop "${1:-}";;
   restart)         cmd_restart "${1:-}";;
   logs)            cmd_logs "${1:-}";;
+  logs-once)       cmd_logs_once "${1:-}";;
   rm)              cmd_rm "${1:-}";;
   edit)            cmd_edit "${1:-}";;
   rebuild)         cmd_rebuild "${1:-}";;
   rebuild-all)     cmd_rebuild_all;;
   update-all)      cmd_update_all;;
+  get-env)         cmd_get_env "${1:-}" "${2:-}";;
+  set-env)         cmd_set_env "${1:-}" "${2:-}" "${3:-}" "${4:-}";;
+  unset-env)       cmd_unset_env "${1:-}" "${2:-}" "${3:-}";;
+  set-host-port)   cmd_set_host_port "${1:-}" "${2:-}";;
   set-expiry)      cmd_set_expiry "${1:-}" "${2:-}";;
   renew)           cmd_renew "${1:-}" "${2:-}";;
   check-expiry)    cmd_check_expiry;;
   update-vendor)   cmd_update_vendor;;
   self-update)     cmd_self_update;;
-  help|--help|-h)  echo "Use: wingsbot-manager [menu|create|list|info|start|stop|restart|logs|rm|edit|rebuild|rebuild-all|update-all|set-expiry|renew|check-expiry|update-vendor|self-update]";;
+  admin-bot)       sub="${1:-}"; shift || true; case "$sub" in install) cmd_admin_bot_install;; start) cmd_admin_bot_start;; stop) cmd_admin_bot_stop;; restart) cmd_admin_bot_restart;; status) cmd_admin_bot_status;; logs) cmd_admin_bot_logs;; edit) cmd_admin_bot_edit;; uninstall) cmd_admin_bot_uninstall;; *) echo "Use: wingsbot-manager admin-bot [install|start|stop|restart|status|logs|edit|uninstall]";; esac;;
+  help|--help|-h)  echo "Use: wingsbot-manager [menu|create|list|info|start|stop|restart|logs|logs-once|rm|edit|rebuild|rebuild-all|update-all|get-env|set-env|unset-env|set-host-port|set-expiry|renew|check-expiry|update-vendor|self-update|admin-bot]";;
   *)               menu_main;;
 esac

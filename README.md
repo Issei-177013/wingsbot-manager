@@ -52,8 +52,13 @@ wingsbot-manager renew mybot 15
 - `info <name>`: print a bot’s `.env`, metadata, and compose file
 - `start|stop|restart <name>`: lifecycle
 - `logs <name>`: tail logs
+- `logs-once <name>`: show last 200 log lines (non-follow)
 - `rm <name>`: stop and remove a bot directory
 - `edit <name>`: interactively update bot config (.env, ports); restarts the bot
+- `get-env <name> [KEY]`: print .env or a single key
+- `set-env <name> <KEY> <VALUE> [--no-restart]`: update .env and restart (unless `--no-restart`)
+- `unset-env <name> <KEY> [--no-restart]`: remove a key from .env and restart
+- `set-host-port <name> <auto|PORT>`: change mapped host port (restarts)
 - `rebuild <name>`: rebuild a bot from vendored code (down + up --build)
 - `rebuild-all`: rebuild all non-expired bots
 - `update-all`: update vendored fork then rebuild all non-expired bots
@@ -61,10 +66,11 @@ wingsbot-manager renew mybot 15
 - `renew <name> <days>`: extend expiry by N days
 - `check-expiry`: stop any expired bots (use in cron)
 - `update-vendor`: pull latest code for your vendored fork
+- `admin-bot [install|start|stop|restart|status|logs|edit|uninstall]`: Telegram control bot setup & management
 - `self-update`: update the manager repo itself
 
 ## Defaults (editable at top of script)
-- Internal port (webhook): `9090`
+- Internal port (webhook): `8080`
 - Auto host-port range: `10001–19999`
 - Default expiry: `0` (no expiry)
 
@@ -98,3 +104,13 @@ sudo /opt/wingsbot-manager/uninstall.sh
 ## Security
 - `.env` files contain secrets; permissions are set to `600`.
 - Lock down server access; use HTTPS for webhook endpoints.
+## Telegram Control Bot (optional)
+- Install and start:
+  - `wingsbot-manager admin-bot install`
+  - Prompts: `MANAGER_BOT_TOKEN`, `ADMIN_IDS` (comma-separated Telegram user IDs)
+- Use in Telegram (only by admins):
+  - `/list`, `/info <name>`, `/startbot <name>`, `/stopbot <name>`, `/restart <name>`
+  - `/setexpiry <name> <days|YYYY-MM-DD|0>`, `/renew <name> <days>`
+  - `/create` (interactive wizard)
+  - `/updateall`
+- The control bot calls the local CLI under the hood and keeps data safe.
