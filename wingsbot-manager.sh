@@ -404,7 +404,7 @@ cmd_check_expiry(){
     name="$(basename "$d")"
     local exp="${EXPIRES_AT:-0}"
     if [[ "$exp" -gt 0 && "$now" -ge "$exp" ]]; then
-      if container_running "$name"; then
+      if container_running "wingsbot-$name"; then
         yellow "Stopping expired bot: ${name}"
         compose_down "$name" || true
       fi
@@ -416,18 +416,53 @@ cmd_update_vendor(){ ensure_dirs; ensure_repo; green "Vendor updated."; }
 
 # === Manager self-update ===
 cmd_self_update(){
+  local mode="${1:-}"      # optional: --force or --apply-stash
+  local maybe_apply="${2:-}"
   local dir="${MANAGER_ROOT}"
   [[ -d "$dir/.git" ]] || die "Manager directory is not a git repo: $dir. Reinstall via installer."
   green "Updating manager at ${dir}"
-  if git -C "$dir" pull --ff-only; then
-    green "Manager updated. Restart the tool to use latest code."
-  else
-    if command -v sudo >/dev/null 2>&1 && [[ ${EUID:-$(id -u)} -ne 0 ]]; then
-      yellow "Retrying with sudo..."
-      sudo git -C "$dir" pull --ff-only || die "sudo git pull failed."
-      green "Manager updated with sudo. Restart the tool to use latest code."
+
+  # Stash local changes if any
+  local has_changes=0
+  if ! git -C "$dir" diff --quiet || ! git -C "$dir" diff --cached --quiet; then
+    has_changes=1
+    yellow "Local changes detected; stashing before update..."
+    git -C "$dir" stash push -u -m "wingsbot-manager auto-stash $(date -u +%Y-%m-%dT%H:%M:%SZ)" || true
+  fi
+
+  # Determine branch
+  local branch
+  branch="$(git -C "$dir" rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)"
+
+  # Fetch and update
+  if git -C "$dir" fetch --all --prune; then
+    if [[ "$mode" == "--force" ]]; then
+      yellow "Forcing reset to origin/${branch} (local commits will be kept but HEAD will move)."
+      git -C "$dir" reset --hard "origin/${branch}" || die "reset --hard failed"
+      green "Manager updated (forced)."
     else
-      die "git pull failed. Check permissions for: $dir"
+      if git -C "$dir" pull --ff-only; then
+        green "Manager updated."
+      else
+        red "git pull failed. If you want to force update, run: wingsbot-manager self-update --force"
+        return 1
+      fi
+    fi
+  else
+    die "git fetch failed. Check network/permissions."
+  fi
+
+  # Optionally re-apply stash
+  if [[ "$mode" == "--apply-stash" || "$maybe_apply" == "--apply-stash" ]]; then
+    yellow "Attempting to re-apply stashed changes..."
+    if git -C "$dir" stash list | grep -q 'wingsbot-manager auto-stash'; then
+      git -C "$dir" stash pop || yellow "Stash pop had conflicts or no matching stash. Resolve manually if needed."
+    else
+      yellow "No auto-stash entry found."
+    fi
+  else
+    if [[ "$has_changes" -eq 1 ]]; then
+      yellow "Your previous local changes were stashed. Use 'git -C ${dir} stash list' to review."
     fi
   fi
 }
