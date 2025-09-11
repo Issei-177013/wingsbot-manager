@@ -14,9 +14,45 @@ echo "[*] Updating apt cache..."
 apt-get update -y
 
 # Use Ubuntu's docker.io + docker-compose-plugin; avoid containerd.io conflicts on 24.04
-echo "[*] Installing required packages..."
+echo "[*] Installing base packages (git, curl, ca-certificates, gnupg)..."
 DEBIAN_FRONTEND=noninteractive apt-get install -y \
-  git docker.io docker-compose-plugin curl ca-certificates
+  git curl ca-certificates gnupg
+
+# Try Ubuntu's docker.io first
+if ! command -v docker >/dev/null 2>&1; then
+  echo "[*] Installing docker.io from Ubuntu repo..."
+  DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io || true
+fi
+
+# Try to get docker compose plugin from Ubuntu repo
+if ! docker compose version >/dev/null 2>&1; then
+  echo "[*] Installing docker-compose-plugin from Ubuntu repo..."
+  DEBIAN_FRONTEND=noninteractive apt-get install -y docker-compose-plugin || true
+fi
+
+# If compose plugin still missing, set up official Docker repo and install CE + plugins
+if ! docker compose version >/dev/null 2>&1; then
+  echo "[*] docker-compose-plugin not found. Setting up official Docker APT repository..."
+  install -m 0755 -d /etc/apt/keyrings
+  curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+  chmod a+r /etc/apt/keyrings/docker.gpg
+  . /etc/os-release
+  echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu ${VERSION_CODENAME} stable" \
+    > /etc/apt/sources.list.d/docker.list
+
+  echo "[*] Updating apt cache (Docker repo)..."
+  apt-get update -y
+
+  if command -v docker >/dev/null 2>&1; then
+    echo "[*] Installing compose/buildx plugins from Docker repo..."
+    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+      docker-buildx-plugin docker-compose-plugin
+  else
+    echo "[*] Installing docker-ce and compose plugin from Docker repo..."
+    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+      docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+  fi
+fi
 
 echo "[*] Enabling & starting Docker..."
 systemctl enable --now docker || true
