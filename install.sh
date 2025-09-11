@@ -89,6 +89,21 @@ if ! docker buildx version >/dev/null 2>&1; then
   DEBIAN_FRONTEND=noninteractive apt-get install -y docker-buildx-plugin
 fi
 
+# Some distros place buildx in /usr/libexec or /usr/lib; Docker may look in /usr/local/lib too.
+# If buildx still not found, create a compatibility symlink.
+if ! docker buildx version >/dev/null 2>&1; then
+  echo "[*] buildx still not detected; attempting path compatibility symlink..."
+  for src in \
+    /usr/libexec/docker/cli-plugins/docker-buildx \
+    /usr/lib/docker/cli-plugins/docker-buildx; do
+    if [[ -x "$src" ]]; then
+      mkdir -p /usr/local/lib/docker/cli-plugins
+      ln -sf "$src" /usr/local/lib/docker/cli-plugins/docker-buildx
+      break
+    fi
+  done
+fi
+
 echo "[*] Enabling & starting Docker..."
 systemctl enable --now docker || true
 

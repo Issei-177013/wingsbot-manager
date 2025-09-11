@@ -76,13 +76,9 @@ pick_free_port(){
 compose_up(){
   local bot="$1"
   local dir="${BOTS_DIR}/${bot}"
-  if docker buildx version >/dev/null 2>&1; then
-    (cd "$dir" && compose_cmd up -d --build)
-  else
-    yellow "docker buildx plugin not found; falling back to 'docker build' + compose --no-build"
-    docker build -t "$bot" "$REPO_DIR"
-    (cd "$dir" && compose_cmd up -d --no-build)
-  fi
+  # Always prebuild with classic builder to avoid buildx path issues
+  DOCKER_BUILDKIT=0 docker build -t "$bot" "$REPO_DIR"
+  (cd "$dir" && docker compose up -d --no-build)
 }
 compose_down(){
   local bot="$1"
