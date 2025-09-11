@@ -41,6 +41,11 @@ def run_manager(args: List[str], stdin_data: Optional[str] = None, timeout: int 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not ensure_auth(update.effective_user.id):
+        await update.message.reply_text(
+            f"Unauthorized. Your ID: {update.effective_user.id}\n"
+            "Ask the server admin to add it:\n"
+            "  wingsbot-manager admin-bot set-env ADMIN_IDS <id1,id2>"
+        )
         return
     await update.message.reply_text(
         "WINGS Manager Bot\nCommands:\n"
@@ -61,6 +66,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not ensure_auth(update.effective_user.id):
+        await update.message.reply_text("Unauthorized. Use /id to get your numeric ID.")
         return
     p = run_manager(["list"]) 
     text = p.stdout.strip() or p.stderr.strip() or "(no output)"
@@ -69,6 +75,7 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not ensure_auth(update.effective_user.id):
+        await update.message.reply_text("Unauthorized. Use /id to get your numeric ID.")
         return
     if not context.args:
         await update.message.reply_text("Usage: /info <name>")
@@ -83,6 +90,7 @@ async def cmd_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_simple(update: Update, context: ContextTypes.DEFAULT_TYPE, action: str) -> None:
     if not ensure_auth(update.effective_user.id):
+        await update.message.reply_text("Unauthorized. Use /id to get your numeric ID.")
         return
     if not context.args:
         await update.message.reply_text(f"Usage: /{action} <name>")
@@ -338,6 +346,7 @@ def build_app() -> Application:
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("id", cmd_id))
     app.add_handler(CommandHandler("list", cmd_list))
     app.add_handler(CommandHandler("info", cmd_info))
     app.add_handler(CommandHandler("logs", cmd_logs))
@@ -382,4 +391,7 @@ def main():
 
 
 if __name__ == "__main__":
+async def cmd_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(f"Your user ID: {update.effective_user.id}")
+
     main()
