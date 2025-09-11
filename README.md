@@ -1,23 +1,29 @@
 # wingsbot-manager
 
-A small, menu-driven Bash manager to **create, run, list, stop, renew, and auto-expire multiple Telegram bot instances** built from your fork of `WINGSBOT`. Each bot runs in its own Docker container with isolated data/logs.
+A small CLI + Telegram-based manager to **create, run, list, stop, renew, and auto-expire multiple WINGSBOT instances**. Each bot runs in its own Docker container with isolated data/logs. The preferred UX is via the bundled Telegram "admin control bot"; the local CLI is non-interactive and script-friendly.
 
 ## One-liner install (Ubuntu)
 ```bash
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/Issei-177013/wingsbot-manager/main/install.sh)"
 ```
 
-Then run:
+Then set up the Telegram admin bot:
 ```bash
-wingsbot-manager
+# installs and starts a small PTB bot to manage your bots via Telegram
+wingsbot-manager admin-bot install --token <TELEGRAM_BOT_TOKEN> --admins 123456,789012
+
+# see status/logs
+wingsbot-manager admin-bot status
+wingsbot-manager admin-bot logs
 ```
 
 ## Features
-- **Interactive menu** (no flags needed).
+- **Telegram control bot**: manage everything from Telegram (create, start/stop, logs, edit env, renew, etc.).
 - **Per-bot isolation** under `bots/<name>`: each has `.env`, `docker-compose.yml`, `data/`, `logs/`.
 - **Webhook support (optional)** with **auto host-port assignment** (configurable range).
 - **Expiry & renewal**: set an expiry (days or date), auto-stop expired bots, renew on demand.
 - **Cron-friendly**: `check-expiry` is idempotent; schedule it safely.
+- **No buildx required**: classic `docker build` + `compose up --no-build` for reliability.
 - **Vendor once**: your WINGSBOT fork is cloned into `vendor/WINGSBOT` and reused.
 
 ## Requirements
@@ -29,24 +35,28 @@ wingsbot-manager
 
 ## Quick start
 ```bash
-# open interactive menus
-wingsbot-manager
+# 1) Install and run the Telegram control bot
+wingsbot-manager admin-bot install --token <TELEGRAM_BOT_TOKEN> --admins 123456,789012
 
-# or use CLI directly:
-wingsbot-manager create mybot
+# 2) Manage from Telegram (by admins only):
+#   /create, /list, /info <name>, /logs <name>
+#   /startbot <name>, /stopbot <name>, /restart <name>
+#   /setenv <name> KEY VALUE, /getenv <name> [KEY]
+#   /setexpiry <name> <days|YYYY-MM-DD|0>, /renew <name> <days>
+#   /rm <name>, /rebuild <name>, /updateall
+
+# 3) Optional local CLI usage:
+wingsbot-manager help
 wingsbot-manager list
+wingsbot-manager create mybot
 wingsbot-manager logs mybot
-wingsbot-manager edit mybot
-wingsbot-manager rebuild mybot        # rebuild from latest vendor code
-wingsbot-manager rebuild-all          # rebuild all non-expired bots
-wingsbot-manager update-all           # update vendor + rebuild all
-wingsbot-manager self-update          # update the manager itself (git pull)
 wingsbot-manager set-expiry mybot 30
 wingsbot-manager renew mybot 15
+wingsbot-manager update-all
 ```
 
-## Commands
-- `menu` (default): interactive UI
+## Commands (CLI)
+  
 - `create <name>`: create & run a new bot (interactive prompts)
 - `list`: list all bots with status, expiry, and ports
 - `info <name>`: print a bot’s `.env`, metadata, and compose file
@@ -65,9 +75,10 @@ wingsbot-manager renew mybot 15
 - `set-expiry <name> <days|YYYY-MM-DD|0|none>`: set/override expiry (`0`/`none` disables)
 - `renew <name> <days>`: extend expiry by N days
 - `check-expiry`: stop any expired bots (use in cron)
+- `cron install|remove`: manage expiry-check cron
 - `update-vendor`: pull latest code for your vendored fork
-- `admin-bot [install|start|stop|restart|status|logs|edit|uninstall]`: Telegram control bot setup & management
-- `self-update`: update the manager repo itself
+- `self-update [--force|--apply-stash]`: update the manager repo itself
+- `admin-bot [install|start|stop|restart|status|logs|edit|uninstall|get-env|set-env|unset-env]`: Telegram control bot setup & management
 
 ## Defaults (editable at top of script)
 - Internal port (webhook): `8080`
@@ -76,20 +87,27 @@ wingsbot-manager renew mybot 15
 
 ## Webhook & ports
 If you choose `USE_WEBHOOK=true` at creation time:
-- The manager will map `HOST_PORT:INTERNAL_PORT` in compose.
-- It will auto-pick a free host port in `10001–19999`, or you can specify one.
-- If you don’t use webhook, **no ports are exposed**.
+- The manager will map `HOST_PORT:WEBHOOK_PORT` in compose (internal default: `8080`).
+- It will auto-pick a free host port in `10001-19999`, or you can specify one.
+- If you don't use webhook, **no ports are exposed**.
 
 ## Cron (auto-stop expired bots)
 ```bash
-0 */12 * * * /usr/local/bin/wingsbot-manager check-expiry >/dev/null 2>&1
+# recommended
+wingsbot-manager cron install
+
+# remove later
+wingsbot-manager cron remove
 ```
 
-## Update vendored fork
+## Update vendored fork & rebuild
 ```bash
+# one-shot: update vendor and rebuild all non-expired bots
+wingsbot-manager update-all
+
+# or separately
 wingsbot-manager update-vendor
-# then restart a bot if needed
-wingsbot-manager restart mybot
+wingsbot-manager rebuild-all
 ```
 
 ## Backup & restore
@@ -104,13 +122,14 @@ sudo /opt/wingsbot-manager/uninstall.sh
 ## Security
 - `.env` files contain secrets; permissions are set to `600`.
 - Lock down server access; use HTTPS for webhook endpoints.
-## Telegram Control Bot (optional)
-- Install and start:
-  - `wingsbot-manager admin-bot install`
-  - Prompts: `MANAGER_BOT_TOKEN`, `ADMIN_IDS` (comma-separated Telegram user IDs)
-- Use in Telegram (only by admins):
-  - `/list`, `/info <name>`, `/startbot <name>`, `/stopbot <name>`, `/restart <name>`
+## Telegram Control Bot
+- Install/start:
+  - `wingsbot-manager admin-bot install --token <TOKEN> --admins 123,456`
+  - or run `admin-bot install` and follow prompts
+- Use in Telegram (admins only):
+  - `/create`, `/list`, `/info <name>`, `/logs <name>`
+  - `/startbot <name>`, `/stopbot <name>`, `/restart <name>`
+  - `/setenv <name> <KEY> <VALUE>`, `/getenv <name> [KEY]`
   - `/setexpiry <name> <days|YYYY-MM-DD|0>`, `/renew <name> <days>`
-  - `/create` (interactive wizard)
-  - `/updateall`
+  - `/rm <name>`, `/rebuild <name>`, `/updateall`
 - The control bot calls the local CLI under the hood and keeps data safe.
