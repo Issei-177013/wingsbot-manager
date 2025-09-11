@@ -6,3 +6,6 @@ bots/*/logs/
 .DS_Store
 *.swp
 *.swo
+
+# tmp
+tmp_WINGSBOT
