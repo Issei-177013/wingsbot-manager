@@ -67,8 +67,16 @@ pick_free_port(){
   return 1
 }
 
-compose_up(){ local bot="$1" dir="${BOTS_DIR}/${bot}"; (cd "$dir" && compose_cmd up -d --build); }
-compose_down(){ local bot="$1" dir="${BOTS_DIR}/${bot}"; (cd "$dir" && compose_cmd down); }
+compose_up(){
+  local bot="$1"
+  local dir="${BOTS_DIR}/${bot}"
+  (cd "$dir" && compose_cmd up -d --build)
+}
+compose_down(){
+  local bot="$1"
+  local dir="${BOTS_DIR}/${bot}"
+  (cd "$dir" && compose_cmd down)
+}
 
 bot_exists(){ [[ -d "${BOTS_DIR}/$1" ]]; }
 action_pause(){ read -rp "Press ENTER to continue..." _; }
@@ -157,10 +165,13 @@ cmd_list(){
   printf "%-20s %-10s %-20s %-10s %-10s\n" "NAME" "STATUS" "EXPIRES_AT" "HOST" "INT"
   for d in "${BOTS_DIR}"/*; do
     [[ -d "$d" ]] || continue
-    local name; name="$(basename "$d")"
+    local name
+    name="$(basename "$d")"
+    # shellcheck source=/dev/null
     source "$d/metadata.env" 2>/dev/null || true
     local status="stopped"; container_running "$name" && status="running"
-    local exp="${EXPIRES_AT:-0}"; [[ "${exp:-0}" -gt 0 ]] && exp="$(epoch_to_date "$exp")" || exp="-"
+    local exp="${EXPIRES_AT:-0}"
+    [[ "${exp:-0}" -gt 0 ]] && exp="$(epoch_to_date "$exp")" || exp="-"
     printf "%-20s %-10s %-20s %-10s %-10s\n" "$name" "$status" "$exp" "${HOST_PORT:--}" "${INTERNAL_PORT:--}"
   done
 }
@@ -170,6 +181,7 @@ cmd_start(){
   local bot="${1:-}"; [[ -n "$bot" ]] || { read -rp "Bot name: " bot; }
   local dir="${BOTS_DIR}/${bot}"; [[ -d "$dir" ]] || die "Bot not found: $bot"
   # Prevent starting expired bots
+  # shellcheck source=/dev/null
   source "${dir}/metadata.env" 2>/dev/null || true
   local now; now="$(now_epoch)"
   local exp="${EXPIRES_AT:-0}"
@@ -194,7 +206,9 @@ cmd_edit(){
   local dir="${BOTS_DIR}/${bot}"; [[ -d "$dir" ]] || die "Bot not found: $bot"
 
   # Load current values
+  # shellcheck source=/dev/null
   source "${dir}/.env" 2>/dev/null || true
+  # shellcheck source=/dev/null
   source "${dir}/metadata.env" 2>/dev/null || true
 
   echo "-- Edit config (leave blank to keep current) --"
@@ -297,9 +311,38 @@ cmd_set_expiry(){
   fi
 }
 
-cmd_renew(){ local bot="$1"; local days="${2:-}"; [[ -n "$bot" && -n "$days" ]] || die "Usage: $0 renew <bot> <days>"; local dir="${BOTS_DIR}/${bot}"; [[ -d "$dir" ]] || die "Bot not found: $bot"; source "${dir}/metadata.env" || true; local base="${EXPIRES_AT:-0}"; [[ "$base" -lt "$(now_epoch)" ]] && base="$(now_epoch)"; local new=$(( base + days*86400 )); sed -i -E "s/^EXPIRES_AT=.*/EXPIRES_AT=${new}/" "${dir}/metadata.env"; green "Renewed until: $(epoch_to_date "$new")"; }
+cmd_renew(){
+  local bot="$1"; local days="${2:-}"
+  [[ -n "$bot" && -n "$days" ]] || die "Usage: $0 renew <bot> <days>"
+  local dir="${BOTS_DIR}/${bot}"; [[ -d "$dir" ]] || die "Bot not found: $bot"
+  # shellcheck source=/dev/null
+  source "${dir}/metadata.env" 2>/dev/null || true
+  local base="${EXPIRES_AT:-0}"
+  [[ "$base" -lt "$(now_epoch)" ]] && base="$(now_epoch)"
+  local new=$(( base + days*86400 ))
+  sed -i -E "s/^EXPIRES_AT=.*/EXPIRES_AT=${new}/" "${dir}/metadata.env"
+  green "Renewed until: $(epoch_to_date "$new")"
+}
 
-cmd_check_expiry(){ ensure_dirs; local now; now="$(now_epoch)"; for d in "${BOTS_DIR}"/*; do [[ -d "$d" ]] || continue; source "${d}/metadata.env" 2>/dev/null || true; local name="$(basename "$d")"; local exp="${EXPIRES_AT:-0}"; if [[ "$exp" -gt 0 && "$now" -ge "$exp" ]]; then if container_running "$name"; then yellow "Stopping expired bot: ${name}"; compose_down "$name" || true; fi; fi; done }
+cmd_check_expiry(){
+  ensure_dirs
+  local now
+  now="$(now_epoch)"
+  for d in "${BOTS_DIR}"/*; do
+    [[ -d "$d" ]] || continue
+    # shellcheck source=/dev/null
+    source "${d}/metadata.env" 2>/dev/null || true
+    local name
+    name="$(basename "$d")"
+    local exp="${EXPIRES_AT:-0}"
+    if [[ "$exp" -gt 0 && "$now" -ge "$exp" ]]; then
+      if container_running "$name"; then
+        yellow "Stopping expired bot: ${name}"
+        compose_down "$name" || true
+      fi
+    fi
+  done
+}
 
 cmd_update_vendor(){ ensure_dirs; ensure_repo; green "Vendor updated."; }
 
@@ -325,6 +368,7 @@ cmd_self_update(){
 cmd_rebuild(){
   local bot="${1:-}"; [[ -n "$bot" ]] || { read -rp "Bot name to rebuild: " bot; }
   local dir="${BOTS_DIR}/${bot}"; [[ -d "$dir" ]] || die "Bot not found: $bot"
+  # shellcheck source=/dev/null
   source "${dir}/metadata.env" 2>/dev/null || true
   local now; now="$(now_epoch)"; local exp="${EXPIRES_AT:-0}"
   if [[ "$exp" -gt 0 && "$now" -ge "$exp" ]]; then
@@ -343,7 +387,7 @@ cmd_rebuild_all(){
   for d in "${BOTS_DIR}"/*; do
     [[ -d "$d" ]] || continue
     local name; name="$(basename "$d")"
-    # shellcheck disable=SC1090
+    # shellcheck source=/dev/null
     source "$d/metadata.env" 2>/dev/null || true
     local now; now="$(now_epoch)"; local exp="${EXPIRES_AT:-0}"
     if [[ "$exp" -gt 0 && "$now" -ge "$exp" ]]; then
