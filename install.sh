@@ -13,6 +13,17 @@ fi
 echo "[*] Updating apt cache..."
 apt-get update -y
 
+# Optional: upgrade packages before installation
+# - Set APT_UPGRADE=1 to run "apt-get upgrade -y"
+# - Or set APT_FULL_UPGRADE=1 to run "apt-get full-upgrade -y" (more invasive)
+if [[ "${APT_FULL_UPGRADE:-0}" == "1" ]]; then
+  echo "[*] Upgrading system packages (full-upgrade)..."
+  DEBIAN_FRONTEND=noninteractive apt-get full-upgrade -y
+elif [[ "${APT_UPGRADE:-0}" == "1" ]]; then
+  echo "[*] Upgrading system packages (upgrade)..."
+  DEBIAN_FRONTEND=noninteractive apt-get upgrade -y
+fi
+
 # Use Ubuntu's docker.io + docker-compose-plugin; avoid containerd.io conflicts on 24.04
 echo "[*] Installing base packages (git, curl, ca-certificates, gnupg)..."
 DEBIAN_FRONTEND=noninteractive apt-get install -y \
@@ -21,12 +32,14 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y \
 # Try Ubuntu's docker.io first
 if ! command -v docker >/dev/null 2>&1; then
   echo "[*] Installing docker.io from Ubuntu repo..."
+  apt-get update -y
   DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io || true
 fi
 
 # Try to get docker compose plugin from Ubuntu repo
 if ! docker compose version >/dev/null 2>&1; then
   echo "[*] Installing docker-compose-plugin from Ubuntu repo..."
+  apt-get update -y
   DEBIAN_FRONTEND=noninteractive apt-get install -y docker-compose-plugin || true
 fi
 
@@ -36,6 +49,7 @@ if ! docker compose version >/dev/null 2>&1; then
   install -m 0755 -d /etc/apt/keyrings
   curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
   chmod a+r /etc/apt/keyrings/docker.gpg
+  # shellcheck source=/etc/os-release
   . /etc/os-release
   echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu ${VERSION_CODENAME} stable" \
     > /etc/apt/sources.list.d/docker.list
